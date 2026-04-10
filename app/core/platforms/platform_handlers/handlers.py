@@ -273,6 +273,7 @@ class SoopHandler(PlatformHandler):
     
     @trace_error_decorator
     async def get_stream_info(self, live_url: str) -> StreamData:
+        live_url = normalize_soop_url(live_url)
         if not self.live_stream:
             self.live_stream = streamget.SoopLiveStream(
                 proxy_addr=self.proxy, cookies=self.cookies, username=self.username, password=self.password
