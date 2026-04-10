@@ -257,7 +257,20 @@ class SoopHandler(PlatformHandler):
     ) -> None:
         super().__init__(proxy, cookies, record_quality, platform, username, password)
         self.live_stream: streamget.SoopLiveStream | None = None
-
+    def normalize_soop_url(url: str) -> str:
+        url = url.strip()
+        # play.sooplive.com -> play.sooplive.co.kr
+        if url.startswith("https://play.sooplive.com/"):
+            return url.replace("https://play.sooplive.com/", "https://play.sooplive.co.kr/", 1)
+        if url.startswith("http://play.sooplive.com/"):
+            return url.replace("http://play.sooplive.com/", "https://play.sooplive.co.kr/", 1)
+        # www.sooplive.com -> play.sooplive.co.kr
+        if url.startswith("https://www.sooplive.com/"):
+            return url.replace("https://www.sooplive.com/", "https://play.sooplive.co.kr/", 1)
+        if url.startswith("http://www.sooplive.com/"):
+            return url.replace("http://www.sooplive.com/", "https://play.sooplive.co.kr/", 1)
+        return url
+    
     @trace_error_decorator
     async def get_stream_info(self, live_url: str) -> StreamData:
         if not self.live_stream:
