@@ -1,7 +1,10 @@
 
 services:
   streamcap:
-    image: ihmily/streamcap
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: Arsismyl/streamcap
     tty: true
     ports:
       - "${PORT:-6006}:${PORT:-6006}"
@@ -22,7 +25,10 @@ services:
       - streamcap-network
 
   video_api:
-      image: ihmily/streamcap
+      build:
+        context: .
+        dockerfile: Dockerfile
+      image: Arsismyl/streamcap
       command: python -m app.api.video_stream_service
       ports:
         - "${VIDEO_API_PORT:-6007}:${VIDEO_API_PORT:-6007}"
