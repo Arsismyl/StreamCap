@@ -3,6 +3,6 @@ flet-video==0.1.1
 httpx>=0.28.1
 screeninfo>=0.8.1
 aiofiles>=24.1.0
-streamget==4.0.9
+git+https://github.com/Arsismyl/streamget.git@main
 python-dotenv>=1.0.1
 cachetools>=5.5.2
