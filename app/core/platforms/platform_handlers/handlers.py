@@ -257,6 +257,8 @@ class SoopHandler(PlatformHandler):
     ) -> None:
         super().__init__(proxy, cookies, record_quality, platform, username, password)
         self.live_stream: streamget.SoopLiveStream | None = None
+    
+    @staticmethod
     def normalize_soop_url(url: str) -> str:
         url = url.strip()
         # play.sooplive.com -> play.sooplive.co.kr
@@ -273,7 +275,8 @@ class SoopHandler(PlatformHandler):
     
     @trace_error_decorator
     async def get_stream_info(self, live_url: str) -> StreamData:
-        live_url = normalize_soop_url(live_url)
+        live_url = self.normalize_soop_url(live_url)
+        print(f"[SOOP normalized] {live_url}")
         if not self.live_stream:
             self.live_stream = streamget.SoopLiveStream(
                 proxy_addr=self.proxy, cookies=self.cookies, username=self.username, password=self.password
