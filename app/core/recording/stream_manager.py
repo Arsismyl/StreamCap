@@ -158,9 +158,11 @@ class LiveStreamRecorder:
             codec = utils.get_query_params(stream_info.flv_url, "codec")
             if codec and codec[0] == 'h265':
                 logger.warning("FLV is not supported for h265 codec, use HLS source instead")
-            else:
+            elif stream_info.flv_url:
+                logger.info(f"[source select] choose FLV: {stream_info.flv_url}")
                 return stream_info.flv_url
 
+        logger.info(f"[source select] fallback record_url: {stream_info.record_url}")
         return stream_info.record_url
 
     def _get_record_url(self, stream_info: StreamData):
@@ -298,14 +300,28 @@ class LiveStreamRecorder:
             logger.error(f"Failed to remove recorder instance: {e}")
 
     async def recheck_live_status(self):
-        if not self.should_stop:
-            # not manually stopped
-            recording_duration = time.time() - self.recording_start_time
-            if recording_duration > self.min_valid_recording_duration:
-                if self.app.recording_enabled and not self.is_flv_preferred_platform:
-                    self.app.page.run_task(self.app.record_manager.check_if_live, self.recording)
-            else:
-                self.recording.status_info = RecordingStatus.RECORDING_ERROR
+        # 手动停止，不补拉
+        if self.should_stop or self.recording.manually_stopped:
+            return
+
+        # 已关闭监控，不补拉
+        if not self.recording.monitor_status:
+            return
+
+        recording_duration = time.time() - self.recording_start_time
+
+        # 录制太短，记一次错误，但仍然允许立即复检
+        if recording_duration <= self.min_valid_recording_duration:
+            self.recording.status_info = RecordingStatus.RECORDING_ERROR
+
+        # 不再排除 tiktok / douyin，所有平台都允许立即复检
+        if self.app.recording_enabled:
+            logger.info(
+                f"Immediate recheck after recorder exit: "
+                f"platform={self.platform_key}, live_url={self.live_url}"
+            )
+            await asyncio.sleep(2)
+            self.app.page.run_task(self.app.record_manager.check_if_live, self.recording)
 
     async def start_ffmpeg(
             self,
