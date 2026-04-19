@@ -335,8 +335,14 @@ class LiveStreamRecorder:
                 f"Immediate recheck after recorder exit: "
                 f"platform={self.platform_key}, live_url={self.live_url}"
             )
-            await asyncio.sleep(2)
-            self.app.page.run_task(self.app.record_manager.check_if_live, self.recording)
+            for i in range(3):
+                await asyncio.sleep(2 if i == 0 else 3)
+                logger.info(
+                    f"Immediate recheck {i + 1}/3 after recorder exit: "
+                    f"platform={self.platform_key}, live_url={self.live_url}"
+                )
+                self.app.page.run_task(self.app.record_manager.check_if_live, self.recording)
+
 
     async def start_ffmpeg(
             self,
