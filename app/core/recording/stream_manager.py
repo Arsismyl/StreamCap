@@ -201,6 +201,7 @@ class LiveStreamRecorder:
         logger.info(f"Live URL: {self.live_url}")
         logger.info(f"Use Proxy: {self.proxy or None}")
         self.recording.use_proxy = bool(self.proxy)
+
         handler = platform_handlers.get_platform_handler(
             live_url=self.live_url,
             proxy=self.proxy,
@@ -212,7 +213,21 @@ class LiveStreamRecorder:
             account_type=self.account_config.get(self.platform_key, {}).get("account_type")
         )
 
-        stream_info = await handler.get_stream_info(self.live_url)
+        retry_times = 3 if self.platform_key == "tiktok" else 1
+        stream_info = []
+
+        for attempt in range(1, retry_times + 1):
+            stream_info = await handler.get_stream_info(self.live_url)
+
+            if stream_info and getattr(stream_info, "anchor_name", None):
+                break
+
+            if self.platform_key == "tiktok" and attempt < retry_times:
+                logger.warning(
+                    f"TikTok fetch_stream empty result, retry {attempt}/{retry_times}: {self.live_url}"
+                )
+                await asyncio.sleep(2)
+
         self.recording.is_checking = False
         return stream_info
 

@@ -306,14 +306,27 @@ class RecordingManager:
         async with semaphore:
             stream_info = await recorder.fetch_stream()
             logger.info(f"Stream Data: {stream_info}")
+
+
         if not stream_info or not stream_info.anchor_name:
             logger.error(f"Fetch stream data failed: {recording.url}")
             recording.is_checking = False
+
+            # TikTok 直连偶发空结果时，不立刻判死为录制错误，继续保持监控
+            if platform_key == "tiktok":
+                logger.warning(f"TikTok transient fetch failure, keep monitoring: {recording.url}")
+                recording.status_info = RecordingStatus.MONITORING
+                if recording.monitor_status:
+                    self.app.page.run_task(self.app.record_card_manager.update_card, recording)
+                    self.app.page.pubsub.send_others_on_topic("update", recording)
+                return
+
             recording.status_info = RecordingStatus.LIVE_STATUS_CHECK_ERROR
             if recording.monitor_status:
                 self.app.page.run_task(self.app.record_card_manager.update_card, recording)
                 self.app.page.pubsub.send_others_on_topic("update", recording)
             return
+            
         if self.settings.user_config.get("remove_emojis"):
             stream_info.anchor_name = utils.clean_name(stream_info.anchor_name, self._["live_room"])
 
