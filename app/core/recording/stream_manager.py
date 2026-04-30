@@ -49,6 +49,7 @@ class LiveStreamRecorder:
         self.direct_downloader = None
         self.min_valid_recording_duration = 25
         self.recording_start_time = 0
+        self._recheck_scheduled = False
         os.makedirs(self.output_dir, exist_ok=True)
         self.app.language_manager.add_observer(self)
         self._ = {}
@@ -202,7 +203,13 @@ class LiveStreamRecorder:
         logger.info(f"Use Proxy: {self.proxy or None}")
         self.recording.use_proxy = bool(self.proxy)
 
-        handler = platform_handlers.get_platform_handler(
+        fragile_platforms = {"tiktok", "twitcasting", "twitch"}
+        retry_times = 6 if self.platform_key in fragile_platforms else 1
+
+        stream_info = None
+        last_error = None
+
+        handler_kwargs = dict(
             live_url=self.live_url,
             proxy=self.proxy,
             cookies=self.cookies,
@@ -213,23 +220,68 @@ class LiveStreamRecorder:
             account_type=self.account_config.get(self.platform_key, {}).get("account_type")
         )
 
-        retry_times = 3 if self.platform_key == "tiktok" else 1
-        stream_info = []
+        try:
+            for attempt in range(1, retry_times + 1):
+                try:
+                    # 每次重试都重新创建 handler，避免上一次 HTTP/session 状态污染下一次检测
+                    handler = platform_handlers.get_platform_handler(**handler_kwargs)
+                    stream_info = await handler.get_stream_info(self.live_url)
 
-        for attempt in range(1, retry_times + 1):
-            stream_info = await handler.get_stream_info(self.live_url)
+                    is_live = bool(getattr(stream_info, "is_live", False)) if stream_info else False
+                    has_url = bool(
+                        stream_info and (
+                            getattr(stream_info, "record_url", None)
+                            or getattr(stream_info, "m3u8_url", None)
+                            or getattr(stream_info, "flv_url", None)
+                        )
+                    )
+                    has_anchor = bool(stream_info and getattr(stream_info, "anchor_name", None))
 
-            if stream_info and getattr(stream_info, "anchor_name", None):
-                break
+                    if self.platform_key not in fragile_platforms:
+                        break
 
-            if self.platform_key == "tiktok" and attempt < retry_times:
+                    # TikTok / TwitCasting / Twitch：只有“直播中且有流地址”才立刻返回
+                    if is_live and has_url and has_anchor:
+                        break
+
+                    # 最后一次了，无论结果如何都返回，避免无限卡检测
+                    if attempt >= retry_times:
+                        break
+
+                    logger.warning(
+                        f"{self.platform_key} fetch_stream unstable result, "
+                        f"retry {attempt}/{retry_times}: "
+                        f"is_live={is_live}, has_url={has_url}, has_anchor={has_anchor}, "
+                        f"live_url={self.live_url}"
+                    )
+                    await asyncio.sleep(min(2 * attempt, 12))
+
+                except Exception as e:
+                    last_error = e
+
+                    if attempt >= retry_times:
+                        logger.error(
+                            f"{self.platform_key} fetch_stream failed after "
+                            f"{retry_times} retries: {self.live_url}, error={e}"
+                        )
+                        break
+
+                    logger.warning(
+                        f"{self.platform_key} fetch_stream exception, "
+                        f"retry {attempt}/{retry_times}: {self.live_url}, error={e}"
+                    )
+                    await asyncio.sleep(min(2 * attempt, 12))
+
+            if last_error and not stream_info:
                 logger.warning(
-                    f"TikTok fetch_stream empty result, retry {attempt}/{retry_times}: {self.live_url}"
+                    f"{self.platform_key} fetch_stream return empty after retries: "
+                    f"{self.live_url}, last_error={last_error}"
                 )
-                await asyncio.sleep(2)
 
-        self.recording.is_checking = False
-        return stream_info
+            return stream_info
+
+        finally:
+            self.recording.is_checking = False
 
     async def start_recording(self, stream_info: StreamData):
         """
@@ -323,25 +375,83 @@ class LiveStreamRecorder:
         if not self.recording.monitor_status:
             return
 
-        recording_duration = time.time() - self.recording_start_time
-
-        # 录制太短，记一次错误，但仍然允许立即复检
-        if recording_duration <= self.min_valid_recording_duration:
-            self.recording.status_info = RecordingStatus.RECORDING_ERROR
-
-        # 不再排除 tiktok / douyin，所有平台都允许立即复检
-        if self.app.recording_enabled:
-            logger.info(
-                f"Immediate recheck after recorder exit: "
-                f"platform={self.platform_key}, live_url={self.live_url}"
+        # 防止同一个录制器退出后同时触发多组补拉
+        if self._recheck_scheduled:
+            logger.warning(
+                f"Skip duplicated recheck task: platform={self.platform_key}, live_url={self.live_url}"
             )
-            for i in range(3):
-                await asyncio.sleep(2 if i == 0 else 3)
+            return
+
+        self._recheck_scheduled = True
+
+        try:
+            fragile_platforms = {"tiktok", "twitcasting", "twitch"}
+            is_fragile = self.platform_key in fragile_platforms
+
+            recording_duration = time.time() - self.recording_start_time
+
+            # 短时间断流：普通平台显示错误；脆弱平台先回监控，避免一堆红色录制错误
+            if recording_duration <= self.min_valid_recording_duration:
+                if is_fragile:
+                    self.recording.status_info = RecordingStatus.MONITORING
+                else:
+                    self.recording.status_info = RecordingStatus.RECORDING_ERROR
+
+            if not self.app.recording_enabled:
+                return
+
+            delays = [8, 20, 45, 90] if is_fragile else [2, 5, 8]
+
+            logger.info(
+                f"Schedule recheck after recorder exit: "
+                f"platform={self.platform_key}, live_url={self.live_url}, delays={delays}"
+            )
+
+            for index, delay in enumerate(delays, 1):
+                await asyncio.sleep(delay)
+
+                if self.should_stop or self.recording.manually_stopped:
+                    return
+
+                if not self.recording.monitor_status or not self.app.recording_enabled:
+                    return
+
+                # 已经有新 recorder 接管了，就不要重复启动
+                if self.recording.rec_id in self.app.record_manager.active_recorders:
+                    logger.info(
+                        f"Skip recheck because recorder is already active: "
+                        f"platform={self.platform_key}, live_url={self.live_url}"
+                    )
+                    return
+
                 logger.info(
-                    f"Immediate recheck {i + 1}/3 after recorder exit: "
+                    f"Recheck {index}/{len(delays)} after recorder exit: "
                     f"platform={self.platform_key}, live_url={self.live_url}"
                 )
-                self.app.page.run_task(self.app.record_manager.check_if_live, self.recording)
+
+                try:
+                    ret = self.app.record_manager.check_if_live(self.recording)
+                    if asyncio.iscoroutine(ret):
+                        await ret
+                except Exception as e:
+                    logger.warning(
+                        f"Recheck failed: platform={self.platform_key}, "
+                        f"live_url={self.live_url}, error={e}"
+                    )
+
+                # 复检后如果已经重新录制，结束补拉循环
+                if (
+                    self.recording.rec_id in self.app.record_manager.active_recorders
+                    or self.recording.is_recording
+                ):
+                    logger.info(
+                        f"Recheck succeeded and recording restarted: "
+                        f"platform={self.platform_key}, live_url={self.live_url}"
+                    )
+                    return
+
+        finally:
+            self._recheck_scheduled = False
 
 
     async def start_ffmpeg(
@@ -419,9 +529,42 @@ class LiveStreamRecorder:
             safe_return_code = [0, 255]
             stdout, stderr = await process.communicate()
             
-            if return_code not in safe_return_code and stderr:
+            if return_code not in safe_return_code:
+                err_msg = ""
+                if stderr:
+                    err_msg = stderr.decode(errors="ignore").splitlines()
+                    err_msg = err_msg[0] if err_msg else ""
+
+                fragile_platforms = {"tiktok", "twitcasting", "twitch"}
+                is_fragile = self.platform_key in fragile_platforms
+
                 if not self.recording.is_recording:
-                    logger.error(f"FFmpeg Stderr Output: {str(stderr.decode()).splitlines()[0]}")
+                    logger.error(f"FFmpeg Stderr Output: {err_msg or 'Unknown ffmpeg error'}")
+
+                    # TikTok / TwitCasting / Twitch：FFmpeg 断流优先当作可恢复断流，不要 stop_recording
+                    if is_fragile and self.recording.monitor_status and not self.should_stop:
+                        logger.warning(
+                            f"Recoverable ffmpeg exit on {self.platform_key}, "
+                            f"switch to monitoring and recheck later: "
+                            f"return_code={return_code}, live_url={live_url}"
+                        )
+
+                        self.recording.is_live = False
+                        self.recording.status_info = RecordingStatus.MONITORING
+                        self.recording.live_title = None
+
+                        try:
+                            display_title = self.recording.title
+                            self.recording.update({"display_title": display_title})
+                            await self.app.record_card_manager.update_card(self.recording)
+                            self.app.page.pubsub.send_others_on_topic("update", self.recording)
+                        except Exception as e:
+                            logger.debug(f"Failed to update UI: {e}")
+
+                        await self.recheck_live_status()
+                        return False
+
+                    # 其他平台维持原来的错误处理
                     self.recording.status_info = RecordingStatus.RECORDING_ERROR
 
                     try:
@@ -512,6 +655,28 @@ class LiveStreamRecorder:
 
         except Exception as e:
             logger.error(f"An error occurred during the subprocess execution: {e}")
+
+            fragile_platforms = {"tiktok", "twitcasting", "twitch"}
+
+            # TikTok / TwitCasting / Twitch：子进程异常优先保留监控，不要减少监控数量
+            if (
+                self.platform_key in fragile_platforms
+                and self.recording.monitor_status
+                and not self.should_stop
+            ):
+                self.recording.is_live = False
+                self.recording.status_info = RecordingStatus.MONITORING
+                self.recording.live_title = None
+
+                try:
+                    await self.app.record_card_manager.update_card(self.recording)
+                    self.app.page.pubsub.send_others_on_topic("update", self.recording)
+                except Exception as ui_e:
+                    logger.debug(f"Failed to update UI: {ui_e}")
+
+                await self.recheck_live_status()
+                return False
+
             self.recording.status_info = RecordingStatus.RECORDING_ERROR
 
             try:
@@ -694,6 +859,9 @@ class LiveStreamRecorder:
             "lang": "referer:https://www.lang.live",
             "shopee": "origin:" + live_domain,
             "blued": "referer:https://app.blued.cn",
+            "tiktok": "referer:https://www.tiktok.com",
+            "twitch": "referer:https://www.twitch.tv",
+            "twitcasting": "referer:https://twitcasting.tv",
         }
         return record_headers.get(platform_key)
 
