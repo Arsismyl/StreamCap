@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import random
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -31,6 +32,13 @@ class RecordingManager:
         self.initialize_dynamic_state()
         max_concurrent = int(self.settings.user_config.get("platform_max_concurrent_requests", 3))
         self.platform_semaphores = defaultdict(lambda: asyncio.Semaphore(max_concurrent))
+
+        # Twitch 单独串行排队：不减少监控数量，只是不让 Twitch 同时打多个请求
+        self.platform_semaphores["twitch"] = asyncio.Semaphore(1)
+        # Twitch 请求节流，避免一轮监控里连续请求太密集
+        self.platform_last_fetch_time = defaultdict(lambda: datetime.min)
+        self.platform_throttle_locks = defaultdict(asyncio.Lock)
+
         self.active_recorders = {}
 
     @property
@@ -195,6 +203,81 @@ class RecordingManager:
                 if not recording.detection_time or is_exceeded:
                     self.app.page.run_task(self.check_if_live, recording)
 
+
+        async def _platform_throttle_before_fetch(self, platform_key: str):
+        """
+        Platform-level request throttle.
+        For Twitch, do not reduce monitored rooms; only queue and stagger requests.
+        """
+        if platform_key != "twitch":
+            return
+
+        async with self.platform_throttle_locks[platform_key]:
+            min_interval = float(
+                self.settings.user_config.get("twitch_request_interval_seconds", 12) or 12
+            )
+
+            now = datetime.now()
+            last_time = self.platform_last_fetch_time[platform_key]
+            elapsed = (now - last_time).total_seconds()
+
+            if elapsed < min_interval:
+                sleep_time = min_interval - elapsed + random.uniform(1, 4)
+                logger.info(f"Twitch fetch throttle sleep {sleep_time:.1f}s")
+                await asyncio.sleep(sleep_time)
+
+            self.platform_last_fetch_time[platform_key] = datetime.now()
+
+    async def _fetch_stream_with_retry(self, recorder, recording: Recording, platform_key: str):
+        """
+        Fetch stream data with platform-specific retry.
+        Twitch often returns empty/non-JSON responses on VPS; use slow retry.
+        """
+        if platform_key == "twitch":
+            retry_times = int(
+                self.settings.user_config.get("twitch_fetch_retry_times", 6) or 6
+            )
+        else:
+            retry_times = 1
+
+        stream_info = []
+
+        for attempt in range(1, retry_times + 1):
+            try:
+                await self._platform_throttle_before_fetch(platform_key)
+
+                if platform_key == "twitch":
+                    logger.info(
+                        f"Twitch fetch attempt {attempt}/{retry_times}: {recording.url}"
+                    )
+
+                stream_info = await recorder.fetch_stream()
+
+                if stream_info and getattr(stream_info, "anchor_name", None):
+                    return stream_info
+
+                if platform_key == "twitch":
+                    logger.warning(
+                        f"Twitch fetch empty result attempt {attempt}/{retry_times}: {recording.url}"
+                    )
+
+            except Exception as e:
+                logger.warning(
+                    f"Fetch stream exception attempt {attempt}/{retry_times}: "
+                    f"{recording.url}, error={repr(e)}"
+                )
+                stream_info = []
+
+            if platform_key == "twitch" and attempt < retry_times:
+                delay = min(10 * attempt, 60) + random.uniform(0, 5)
+                logger.warning(
+                    f"Twitch fetch retry after {delay:.1f}s: {recording.url}"
+                )
+                await asyncio.sleep(delay)
+
+        return stream_info
+
+
     _periodic_task_running = False
 
     @classmethod
@@ -304,7 +387,7 @@ class RecordingManager:
         semaphore = self.platform_semaphores[platform_key]
         recorder = LiveStreamRecorder(self.app, recording, recording_info)
         async with semaphore:
-            stream_info = await recorder.fetch_stream()
+            stream_info = await self._fetch_stream_with_retry(recorder, recording, platform_key)
             logger.info(f"Stream Data: {stream_info}")
 
 
@@ -312,9 +395,9 @@ class RecordingManager:
             logger.error(f"Fetch stream data failed: {recording.url}")
             recording.is_checking = False
 
-            # TikTok 直连偶发空结果时，不立刻判死为录制错误，继续保持监控
-            if platform_key == "tiktok":
-                logger.warning(f"TikTok transient fetch failure, keep monitoring: {recording.url}")
+            # TikTok,twitch直连偶发空结果时，不立刻判死为录制错误，继续保持监控
+            if platform_key in ("tiktok", "twitch"):
+                logger.warning(f"{platform_key} transient fetch failure, keep monitoring: {recording.url}")
                 recording.status_info = RecordingStatus.MONITORING
                 if recording.monitor_status:
                     self.app.page.run_task(self.app.record_card_manager.update_card, recording)
