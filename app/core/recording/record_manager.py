@@ -204,7 +204,7 @@ class RecordingManager:
                     self.app.page.run_task(self.check_if_live, recording)
 
 
-        async def _platform_throttle_before_fetch(self, platform_key: str):
+    async def _platform_throttle_before_fetch(self, platform_key: str):
         """
         Platform-level request throttle.
         For Twitch, do not reduce monitored rooms; only queue and stagger requests.
