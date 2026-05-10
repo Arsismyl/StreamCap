@@ -318,8 +318,11 @@ class LiveStreamRecorder:
             headers = {}
             header_params = self.get_headers_params(record_url, self.platform_key)
             if header_params:
-                key, value = header_params.split(":", 1)
-                headers[key] = value
+                for line in header_params.splitlines():
+                    if ":" not in line:
+                        continue
+                    key, value = line.split(":", 1)
+                    headers[key.strip()] = value.strip()
 
             self.direct_downloader = DirectStreamDownloader(
                 record_url=record_url,
@@ -846,9 +849,26 @@ class LiveStreamRecorder:
         except Exception as e:
             logger.error(f"An error occurred: {e}")
 
-    @staticmethod
-    def get_headers_params(live_url, platform_key):
+    def get_headers_params(self, live_url, platform_key):
         live_domain = "/".join(live_url.split("/")[0:3])
+
+        # TwitCasting 的 HLS CDN 很容易拒绝无浏览器头的 ffmpeg 请求。
+        # StreamGet 检测 m3u8 时带了 headers，但 ffmpeg 录制时也必须带。
+        if platform_key == "twitcasting":
+            cookie = (self.cookies or "").strip()
+
+            headers = [
+                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+                "Referer: https://twitcasting.tv/",
+                "Origin: https://twitcasting.tv",
+                "Accept: */*",
+            ]
+
+            if cookie:
+                headers.append(f"Cookie: {cookie}")
+
+            return "\r\n".join(headers) + "\r\n"
+
         record_headers = {
             "pandalive": "origin:https://www.pandalive.co.kr",
             "winktv": "origin:https://www.winktv.co.kr",
@@ -859,9 +879,6 @@ class LiveStreamRecorder:
             "lang": "referer:https://www.lang.live",
             "shopee": "origin:" + live_domain,
             "blued": "referer:https://app.blued.cn",
-            "tiktok": "referer:https://www.tiktok.com",
-            "twitch": "referer:https://www.twitch.tv",
-            "twitcasting": "referer:https://twitcasting.tv",
         }
         return record_headers.get(platform_key)
 
