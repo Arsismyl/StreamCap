@@ -410,6 +410,10 @@ class RecordingCardManager:
             if not current_page or getattr(current_page, "page_name", None) != "recordings":
                 continue
 
+            # Stop if session is gone (e.g. browser tab closed)
+            if self.app._get_session_loop() is None:
+                break
+
             if recording.is_recording:
                 try:
                     duration_label = self.cards_obj[recording.rec_id]["duration_label"]

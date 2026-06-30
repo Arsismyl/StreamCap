@@ -146,10 +146,13 @@ class App:
             logger.debug(f"schedule_snack dropped: {exc}")
 
     def schedule_pubsub(self, topic: str, payload) -> None:
+        loop = self._get_session_loop()
+        if loop is None:
+            return
         try:
             self.page.pubsub.send_others_on_topic(topic, payload)
-        except Exception as exc:
-            logger.debug(f"schedule_pubsub dropped: {exc}")
+        except Exception:
+            pass
 
     def initialize_pages(self):
         return {
