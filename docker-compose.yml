@@ -1,12 +1,12 @@
 
 services:
   streamcap:
-    image: ihmily/streamcap
+    build: .
     tty: true
     ports:
-      - "${PORT:-6006}:${PORT:-6006}"
+      - "${PORT:-6008}:${PORT:-6008}"
     environment:
-      - PORT=${PORT:-6006}
+      - PORT=${PORT:-6008}
       - TZ=${TZ:-Asia/Shanghai}
     volumes:
       - ./logs:/app/logs
@@ -14,7 +14,7 @@ services:
       - ./downloads:/app/downloads
       - ./.env:/app/.env
     healthcheck:
-      test: ["CMD", "sh", "-c", "curl -f http://localhost:${PORT:-6006}/about"]
+      test: ["CMD", "sh", "-c", "curl -f http://localhost:${PORT:-6008}/about"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -22,12 +22,13 @@ services:
       - streamcap-network
 
   video_api:
-      image: ihmily/streamcap
+      build: .
       command: python -m app.api.video_stream_service
       ports:
-        - "${VIDEO_API_PORT:-6007}:${VIDEO_API_PORT:-6007}"
+        - "${VIDEO_API_PORT:-6009}:${VIDEO_API_PORT:-6009}"
       environment:
         - TZ=${TZ:-Asia/Shanghai}
+        - PORT=${VIDEO_API_PORT:-6009}
         - CUSTOM_VIDEO_ROOT_DIR=${CUSTOM_VIDEO_ROOT_DIR:-./downloads}
       volumes:
         - ./downloads:/app/downloads
