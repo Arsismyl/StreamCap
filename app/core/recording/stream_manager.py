@@ -307,6 +307,11 @@ class LiveStreamRecorder:
                 )
             )
         else:
+            header_params = self.get_headers_params(record_url, self.platform_key)
+            if self.cookies and self.platform_key == "youtube":
+                cookie_header = f"Cookie: {self.cookies}"
+                header_params = f"{header_params}\r\n{cookie_header}" if header_params else cookie_header
+
             ffmpeg_builder = ffmpeg_builders.create_builder(
                 self.save_format,
                 record_url=record_url,
@@ -314,7 +319,7 @@ class LiveStreamRecorder:
                 segment_record=self.segment_record,
                 segment_time=self.segment_time,
                 full_path=save_path,
-                headers=self.get_headers_params(record_url, self.platform_key),
+                headers=header_params,
             )
             ffmpeg_command = ffmpeg_builder.build_command()
             self.services.run_coro(
@@ -661,6 +666,7 @@ class LiveStreamRecorder:
             "shopee": "origin:" + live_domain,
             "blued": "referer:https://app.blued.cn",
             "xindongrebo": "referer:https://xcqrkj.com",
+            "youtube": "referer:https://www.youtube.com",
         }
         return record_headers.get(platform_key)
 
