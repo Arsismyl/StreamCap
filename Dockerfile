@@ -5,12 +5,16 @@ WORKDIR /app
 # Install system dependencies for build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    git \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 COPY requirements-web.txt .
 RUN pip install --no-cache-dir -r requirements-web.txt
+
+# Replace streamget with the forked version from GitHub
+RUN pip install --no-cache-dir git+https://github.com/Arsismyl/streamget.git@main
 
 COPY . .
 RUN mkdir -p /app/logs /app/downloads
