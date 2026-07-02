@@ -1,0 +1,43 @@
+
+services:
+  streamcap:
+    build: .
+    tty: true
+    ports:
+      - "${FORK_PORT:-6008}:${FORK_PORT:-6008}"
+    environment:
+      - PORT=${FORK_PORT:-6008}
+      - TZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - ./logs:/app/logs
+      - ./config:/app/config
+      - ./downloads:/app/downloads
+      - ./.env:/app/.env
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -f http://localhost:${FORK_PORT:-6008}/about"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - streamcap-fork-network
+
+  video_api:
+      build: .
+      command: python -m app.api.video_stream_service
+      ports:
+        - "${FORK_VIDEO_API_PORT:-6009}:${FORK_VIDEO_API_PORT:-6009}"
+      environment:
+        - TZ=${TZ:-Asia/Shanghai}
+        - PORT=${FORK_VIDEO_API_PORT:-6009}
+        - CUSTOM_VIDEO_ROOT_DIR=${CUSTOM_VIDEO_ROOT_DIR:-./downloads}
+      volumes:
+        - ./downloads:/app/downloads
+        - ./.env:/app/.env
+      depends_on:
+        - streamcap
+      networks:
+        - streamcap-fork-network
+
+networks:
+  streamcap-fork-network:
+    driver: bridge
