@@ -584,7 +584,7 @@ class RecordingsPage(PageBase):
         for card in to_remove:
             card_key = card["card"].key
             cards_obj.pop(card_key, None)
-            self.recording_card_area.controls.remove(card["card"])
+            self.recording_card_area.content.controls.remove(card["card"])
         await self.show_all_cards()
 
         self.content_area.controls[1] = self.create_filter_area()
