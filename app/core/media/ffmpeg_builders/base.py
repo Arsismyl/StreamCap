@@ -17,8 +17,8 @@ OVERSEAS_CONFIG = {
 }
 
 FFMPEG_USER_AGENT = (
-    "Mozilla/5.0 (Linux; Android 11; SAMSUNG SM-G973U) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "SamsungBrowser/14.2 Chrome/87.0.4280.141 Mobile Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/141.0.0.0 Safari/537.36"
 )
 
 
@@ -35,6 +35,7 @@ class FFmpegCommandBuilder(abc.ABC):
         segment_time: str | None = None,
         full_path: str | None = None,
         headers: str | None = None,
+        cookies: str | None = None,
         proxy: str | None = None,
     ):
         """
@@ -46,6 +47,7 @@ class FFmpegCommandBuilder(abc.ABC):
         :param segment_time: Time duration for each segment (if applicable).
         :param full_path: Full path where the output file will be saved.
         :param headers: Additional headers to include in the request.
+        :param cookies: Cookie string to pass to FFmpeg via -cookies option.
         :param proxy: Proxy server URL to use for the connection.
         """
         self.record_url = record_url
@@ -55,6 +57,7 @@ class FFmpegCommandBuilder(abc.ABC):
         self.full_path = full_path or ""
         self.proxy = proxy or ""
         self.headers = headers or ""
+        self.cookies = cookies or ""
 
     @abc.abstractmethod
     def build_command(self) -> list[str]:
@@ -99,6 +102,10 @@ class FFmpegCommandBuilder(abc.ABC):
         if self.headers:
             command.insert(11, "-headers")
             command.insert(12, self.headers)
+
+        if self.cookies:
+            command.insert(13, "-cookies")
+            command.insert(14, self.cookies)
 
         if self.proxy:
             command.insert(1, "-http_proxy")

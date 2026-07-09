@@ -308,9 +308,7 @@ class LiveStreamRecorder:
             )
         else:
             header_params = self.get_headers_params(record_url, self.platform_key)
-            if self.cookies and self.platform_key == "youtube":
-                cookie_header = f"Cookie: {self.cookies}"
-                header_params = f"{header_params}\r\n{cookie_header}" if header_params else cookie_header
+            cookie_str = self.cookies if self.platform_key == "youtube" else None
 
             ffmpeg_builder = ffmpeg_builders.create_builder(
                 self.save_format,
@@ -320,6 +318,7 @@ class LiveStreamRecorder:
                 segment_time=self.segment_time,
                 full_path=save_path,
                 headers=header_params,
+                cookies=cookie_str,
             )
             ffmpeg_command = ffmpeg_builder.build_command()
             self.services.run_coro(
