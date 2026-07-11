@@ -66,6 +66,7 @@
     "is_grid_view": true,
     "theme_mode": "light",
     "platform_max_concurrent_requests": "3",
+    "recording_retry_interval": "5",
     "last_route": "/home",
     "check_live_on_browser_refresh": false
 }

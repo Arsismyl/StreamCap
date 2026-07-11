@@ -487,6 +487,16 @@ class SettingsPage(PageBase):
                             ),
                         ),
                         self.create_setting_row(
+                            self._["recording_retry_interval"],
+                            ft.TextField(
+                                value=str(self.get_config_value("recording_retry_interval", 5)),
+                                width=100,
+                                data="recording_retry_interval",
+                                on_change=self.on_change,
+                                hint_text=self._["recording_retry_interval_tip"],
+                            ),
+                        ),
+                        self.create_setting_row(
                             self._["check_live_on_browser_refresh"],
                             ft.Switch(
                                 value=self.get_config_value("check_live_on_browser_refresh", True),

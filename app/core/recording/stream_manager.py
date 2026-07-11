@@ -431,6 +431,20 @@ class LiveStreamRecorder:
                     logger.error(f"FFmpeg Stderr Output: {str(stderr.decode()).splitlines()[0]}")
                     self._handle_recording_error(record_name, self._["record_stream_error"])
 
+                    # Auto-retry once after transient CDN error (e.g. TikTok 5xx)
+                    if not self.should_stop and not getattr(self, '_retried', False):
+                        self._retried = True
+                        try:
+                            retry_delay = int(self.user_config.get("recording_retry_interval", 5))
+                        except (ValueError, TypeError):
+                            retry_delay = 5
+                        retry_delay = max(1, min(retry_delay, 60))
+                        await asyncio.sleep(retry_delay)
+                        logger.info(f"Auto-retry recording after {retry_delay}s delay: {live_url}")
+                        self.services.run_coro(
+                            self.services.recording_manager.check_if_live(self.recording)
+                        )
+
             if return_code in safe_return_code:
                 if not self.recording.is_recording:
                     await self._handle_recording_finished(record_name)

@@ -371,7 +371,9 @@
     "platform_max_concurrent_requests": "平台最大并发录制数",
     "platform_max_concurrent_requests_tip": "每个平台允许同时发起请求的最大并发数，默认3",
     "check_live_on_browser_refresh": "刷新网页时检查直播状态",
-    "check_live_on_browser_refresh_tip": "针对web端运行，开启后每次刷新网页都会重复检测直播间状态"
+    "check_live_on_browser_refresh_tip": "针对web端运行，开启后每次刷新网页都会重复检测直播间状态",
+    "recording_retry_interval": "故障重试间隔(秒)",
+    "recording_retry_interval_tip": "录制异常后自动重试的等待秒数，默认5秒，范围1~60秒"
   },
   "about_page": {
     "about_project": "关于本程序",
