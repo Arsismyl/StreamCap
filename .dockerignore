@@ -1,28 +1,16 @@
-# Version Control
-**/.git
-
-# Development Configuration
-**/.env*
-**/docker-compose*.yml
-**/Dockerfile*
-
-# Documentation and Tests
-**/docs
-**/tests
-**/*.md
-
-# Build Artifacts and Cache
-**/__pycache__
-**/*.pyc
-**/*.log
-**/node_modules
-**/venv
-
-# IDE Files
-**/.vscode
-**/.idea
-
-# Static Assets (Adjust as needed)
-**/.iconset/
-**/*.icns
-assets/images
+.git
+.gitignore
+.gitattributes
+.github
+*.md
+*.log
+.env
+.env.example
+downloads/
+logs/
+node/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ruff_tmp/
