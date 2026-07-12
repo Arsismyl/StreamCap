@@ -308,7 +308,10 @@ class LiveStreamRecorder:
             )
         else:
             header_params = self.get_headers_params(record_url, self.platform_key)
-            cookie_str = self.cookies if self.platform_key == "youtube" else None
+            cookie_str = None
+            if self.platform_key == "youtube" and self.cookies:
+                # FFmpeg -cookies expects newline-delimited format, not semicolons
+                cookie_str = "\n".join(c.strip() for c in self.cookies.split(";"))
 
             ffmpeg_builder = ffmpeg_builders.create_builder(
                 self.save_format,
