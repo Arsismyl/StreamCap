@@ -969,8 +969,6 @@ class YoutubeHandler(PlatformHandler):
         import yt_dlp
 
         ydl_opts = {"quiet": True, "no_warnings": True}
-        if self.cookies:
-            ydl_opts["http_headers"] = {"Cookie": self.cookies}
 
         loop = asyncio.get_event_loop()
 
