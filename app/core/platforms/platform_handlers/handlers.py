@@ -1,6 +1,9 @@
+import asyncio
+
 import streamget
 from deprecated import deprecated
 
+from ....utils.logger import logger
 from ....utils.utils import trace_error_decorator
 from .base import PlatformHandler, StreamData
 
@@ -956,6 +959,58 @@ class YoutubeHandler(PlatformHandler):
 
     @trace_error_decorator
     async def get_stream_info(self, live_url: str) -> StreamData:
+        try:
+            return await self._get_via_ytdlp(live_url)
+        except Exception:
+            logger.debug(f"yt-dlp failed, using streamget fallback: {live_url}")
+            return await self._get_via_streamget(live_url)
+
+    async def _get_via_ytdlp(self, live_url: str) -> StreamData:
+        import yt_dlp
+
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "format": "best",
+        }
+        if self.cookies:
+            ydl_opts["http_headers"] = {"Cookie": self.cookies}
+
+        loop = asyncio.get_event_loop()
+
+        def _extract():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(live_url, download=False)
+
+        info = await loop.run_in_executor(None, _extract)
+
+        if not info.get("is_live"):
+            return StreamData(
+                platform="Youtube",
+                anchor_name=info.get("uploader", ""),
+                is_live=False,
+                live_url=live_url,
+            )
+
+        stream_url = info.get("url")
+        if not stream_url:
+            raise Exception("No stream URL from yt-dlp")
+
+        anchor_name = info.get("uploader", "") or ""
+        title = info.get("title", "") or ""
+
+        return StreamData(
+            platform="Youtube",
+            anchor_name=anchor_name,
+            is_live=True,
+            title=title,
+            quality="OD",
+            m3u8_url=stream_url,
+            record_url=stream_url,
+            live_url=live_url,
+        )
+
+    async def _get_via_streamget(self, live_url: str) -> StreamData:
         if not self.live_stream:
             self.live_stream = streamget.YoutubeLiveStream(proxy_addr=self.proxy, cookies=self.cookies)
         json_data = await self.live_stream.fetch_web_stream_data(url=live_url)
