@@ -961,18 +961,14 @@ class YoutubeHandler(PlatformHandler):
     async def get_stream_info(self, live_url: str) -> StreamData:
         try:
             return await self._get_via_ytdlp(live_url)
-        except Exception:
-            logger.debug(f"yt-dlp failed, using streamget fallback: {live_url}")
+        except Exception as e:
+            logger.error(f"yt-dlp failed ({e}), using streamget fallback: {live_url}")
             return await self._get_via_streamget(live_url)
 
     async def _get_via_ytdlp(self, live_url: str) -> StreamData:
         import yt_dlp
 
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "format": "best",
-        }
+        ydl_opts = {"quiet": True, "no_warnings": True}
         if self.cookies:
             ydl_opts["http_headers"] = {"Cookie": self.cookies}
 
