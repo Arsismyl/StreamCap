@@ -672,6 +672,7 @@ class LiveStreamRecorder:
     def get_headers_params(live_url, platform_key):
         live_domain = "/".join(live_url.split("/")[0:3])
         record_headers = {
+            "twitcasting": "referer:https://twitcasting.tv",
             "pandalive": "origin:https://www.pandalive.co.kr",
             "winktv": "origin:https://www.winktv.co.kr",
             "popkontv": "origin:https://www.popkontv.com",
