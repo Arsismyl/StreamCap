@@ -326,6 +326,7 @@ class LiveStreamRecorder:
         header_params = self.get_headers_params(record_url, self.platform_key)
         cookie_str = None
         if self.platform_key in ("youtube", "twitcasting") and self.cookies:
+            # FFmpeg -cookies expects newline-delimited format, not semicolons
             cookie_str = "\n".join(c.strip() for c in self.cookies.split(";"))
         ffmpeg_builder = ffmpeg_builders.create_builder(
             self.save_format,
@@ -445,6 +446,7 @@ class LiveStreamRecorder:
         save_type: str,
         script_command: str | None = None,
     ) -> bool:
+        """Record a live stream with FFmpeg, reconnecting on transient drops for FLV platforms."""
         logger.info(f"Starting ffmpeg recording - recorder id: {id(self)}, rec_id: {self.recording.rec_id}")
         self.should_stop = False
         self.segment_paths = []
@@ -453,7 +455,6 @@ class LiveStreamRecorder:
             save_file_path = ffmpeg_command[-1]
             self.segment_paths.append(save_file_path)
             segment_index = 0
-            reconnect_failures = 0
             return_code = None
             stderr = None
 
@@ -471,20 +472,28 @@ class LiveStreamRecorder:
                 if self.should_stop or self.recording.force_stop or not self.services.recording_enabled:
                     break
 
-                try:
-                    stream_info = await self.fetch_stream()
-                except Exception as e:
-                    logger.warning(f"Reconnect stream fetch failed: {e}")
-                    stream_info = None
-
-                if stream_info is None:
-                    reconnect_failures += 1
-                    if reconnect_failures >= self.reconnect_max_failures:
-                        logger.warning(f"Giving up reconnect after {reconnect_failures} failed attempts: {live_url}")
+                # Re-fetch stream data with its own retry sub-loop. NEVER re-enter
+                # _run_ffmpeg_pass on a failed fetch: the stale signed URL and the
+                # same output path would make ffmpeg (-y) truncate the segment that
+                # was just recorded.
+                stream_info = None
+                for _ in range(self.reconnect_max_failures):
+                    if self.should_stop or self.recording.force_stop or not self.services.recording_enabled:
+                        break
+                    try:
+                        stream_info = await self.fetch_stream()
+                    except Exception as e:
+                        logger.warning(f"Reconnect stream fetch failed: {e}")
+                        stream_info = None
+                    if stream_info is not None:
                         break
                     await asyncio.sleep(self._get_retry_delay())
-                    continue
 
+                if self.should_stop or self.recording.force_stop or not self.services.recording_enabled:
+                    break
+                if stream_info is None:
+                    logger.warning(f"Giving up reconnect after {self.reconnect_max_failures} failed attempts: {live_url}")
+                    break
                 if not stream_info.is_live or not stream_info.record_url:
                     logger.info(f"Stream ended, finalizing recording: {live_url}")
                     break
@@ -494,7 +503,6 @@ class LiveStreamRecorder:
                 self.segment_paths.append(save_file_path)
                 record_url = self._get_record_url(stream_info)
                 ffmpeg_command = self._build_ffmpeg_command(record_url, save_file_path)
-                reconnect_failures = 0
                 logger.info(f"Reconnecting segment {segment_index}: {save_file_path}")
 
             await self.remove_active_recorder()
@@ -586,6 +594,7 @@ class LiveStreamRecorder:
 
         except Exception as e:
             logger.error(f"An error occurred during the subprocess execution: {e}")
+            await self.remove_active_recorder()
             self._handle_recording_error(record_name, self._["no_ffmpeg_tip"], duration=4000)
             return False
         finally:

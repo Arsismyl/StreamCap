@@ -1,4 +1,5 @@
 import asyncio
+import os
 import tempfile
 import unittest
 from unittest import mock
@@ -118,6 +119,10 @@ class ReconnectLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_exec_count["n"], 2)  # two ffmpeg passes
         self.assertTrue(recorder.recording.is_recording is False)
         m_merge.assert_awaited()
+        # The reconnect segment was recorded to a distinct path.
+        self.assertTrue(os.path.exists(os.path.join(self._tmp.name, "out_001.ts")))
+        # No duplicate notification path: check_if_live must not be called.
+        recorder.services.recording_manager.check_if_live.assert_not_called()
 
     async def test_no_reconnect_when_stream_ends_immediately(self):
         recorder = make_recorder(self.recording, self.info)
@@ -143,6 +148,114 @@ class ReconnectLoopTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(fake_exec_count["n"], 1)
+        self.assertFalse(recorder.recording.is_recording)
+
+    async def test_failed_refetch_does_not_respawn_with_same_path(self):
+        recorder = make_recorder(self.recording, self.info)
+        recorder.should_stop = False
+        recorder.end_message_push = mock.AsyncMock()
+        recorder._get_retry_delay = lambda: 0
+
+        fetched = iter(
+            [
+                StreamData(platform="TikTok", anchor_name="test", is_live=True,
+                           flv_url="http://cdn/stream2.flv?codec=h264&sign=b",
+                           record_url="http://cdn/stream2.flv?codec=h264&sign=b"),
+                StreamData(platform="TikTok", anchor_name="test", is_live=False, record_url=None),
+            ]
+        )
+        fetch_calls = {"n": 0}
+
+        async def fake_fetch():
+            fetch_calls["n"] += 1
+            if fetch_calls["n"] == 1:
+                raise RuntimeError("transient network failure")
+            return next(fetched)
+
+        recorder.fetch_stream = mock.AsyncMock(side_effect=fake_fetch)
+
+        exit_codes = iter([0, 0])
+        fake_exec_count = {"n": 0}
+        output_paths = []
+
+        async def fake_exec(*args, **kwargs):
+            out_path = args[-1]
+            output_paths.append(out_path)
+            with open(out_path, "w") as f:
+                f.write("seg")
+            fake_exec_count["n"] += 1
+            return FakeProcess(next(exit_codes))
+
+        with mock.patch("asyncio.create_subprocess_exec", side_effect=fake_exec), \
+             mock.patch("app.core.recording.stream_manager.merge_ts_segments", new=mock.AsyncMock(return_value=None)):
+            await recorder.start_ffmpeg(
+                "test", "https://www.tiktok.com/@test/live",
+                "http://cdn/stream1.flv?sign=a", ["ffmpeg", "rec", self._tmp.name + "/out.ts"],
+                "ts", None,
+            )
+
+        # A failed re-fetch must NOT respawn ffmpeg with the stale URL / same path.
+        self.assertEqual(fake_exec_count["n"], 2)  # exactly two passes
+        self.assertEqual(len(output_paths), 2)
+        self.assertNotEqual(output_paths[0], output_paths[1])
+        self.assertEqual(output_paths[1], self._tmp.name + "/out_001.ts")
+        self.assertFalse(recorder.recording.is_recording)
+
+    async def test_gives_up_after_max_reconnect_failures(self):
+        recorder = make_recorder(self.recording, self.info)
+        recorder.should_stop = False
+        recorder.end_message_push = mock.AsyncMock()
+        recorder._get_retry_delay = lambda: 0
+        recorder.fetch_stream = mock.AsyncMock(side_effect=RuntimeError("stream down"))
+
+        fake_exec_count = {"n": 0}
+
+        async def fake_exec(*args, **kwargs):
+            out_path = args[-1]
+            with open(out_path, "w") as f:
+                f.write("seg")
+            fake_exec_count["n"] += 1
+            return FakeProcess(0)
+
+        with mock.patch("asyncio.create_subprocess_exec", side_effect=fake_exec), \
+             mock.patch("app.core.recording.stream_manager.merge_ts_segments", new=mock.AsyncMock(return_value=None)):
+            await recorder.start_ffmpeg(
+                "test", "https://www.tiktok.com/@test/live",
+                "http://cdn/stream1.flv?sign=a", ["ffmpeg", "rec", self._tmp.name + "/out.ts"],
+                "ts", None,
+            )
+
+        self.assertEqual(fake_exec_count["n"], 1)  # never respawn with stale URL/path
+        self.assertEqual(recorder.fetch_stream.call_count, 3)  # reconnect_max_failures attempts
+        self.assertFalse(recorder.recording.is_recording)
+
+    async def test_non_flv_platform_is_single_pass(self):
+        info = dict(self.info)
+        info["platform_key"] = "youtube"
+        info["platform"] = "YouTube"
+        recorder = make_recorder(self.recording, info)
+        recorder.should_stop = False
+        recorder.end_message_push = mock.AsyncMock()
+
+        fake_exec_count = {"n": 0}
+
+        async def fake_exec(*args, **kwargs):
+            out_path = args[-1]
+            with open(out_path, "w") as f:
+                f.write("seg")
+            fake_exec_count["n"] += 1
+            return FakeProcess(0)
+
+        with mock.patch("asyncio.create_subprocess_exec", side_effect=fake_exec), \
+             mock.patch("app.core.recording.stream_manager.merge_ts_segments", new=mock.AsyncMock(return_value=None)) as m_merge:
+            await recorder.start_ffmpeg(
+                "test", "https://www.youtube.com/watch?v=abc",
+                "http://cdn/stream1.flv?sign=a", ["ffmpeg", "rec", self._tmp.name + "/out.ts"],
+                "ts", None,
+            )
+
+        self.assertEqual(fake_exec_count["n"], 1)  # single pass, reconnect is FLV-only
+        m_merge.assert_not_awaited()
         self.assertFalse(recorder.recording.is_recording)
 
 

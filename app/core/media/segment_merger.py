@@ -14,6 +14,13 @@ async def merge_ts_segments(segment_paths: list[str], startupinfo=None) -> str |
     """
     valid = [p for p in segment_paths if os.path.exists(p) and os.path.getsize(p) > 0]
     if len(valid) <= 1:
+        # If the only non-empty segment is not the canonical first path (e.g. the
+        # first pass produced an empty file but a reconnect segment has content),
+        # move it onto the canonical first path so downstream convert/script
+        # always sees the content at segment_paths[0].
+        if valid and valid[0] != segment_paths[0]:
+            os.replace(valid[0], segment_paths[0])
+            return segment_paths[0]
         return valid[0] if valid else None
 
     first = segment_paths[0]

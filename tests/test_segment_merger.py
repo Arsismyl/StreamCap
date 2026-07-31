@@ -42,6 +42,15 @@ class MergeTsSegmentsTest(unittest.TestCase):
         result = asyncio.run(merge_ts_segments([self.seg1]))
         self.assertEqual(result, self.seg1)
 
+    def test_single_nonempty_segment_is_moved_to_first_path(self):
+        with open(self.seg1, "w") as f:
+            f.write("")  # empty first segment (first pass recorded nothing)
+        result = asyncio.run(merge_ts_segments([self.seg1, self.seg2]))
+        self.assertEqual(result, self.seg1)
+        with open(self.seg1) as f:
+            self.assertEqual(f.read(), "BBB")
+        self.assertFalse(os.path.exists(self.seg2))
+
     async def _run_with_fake_exec(self, returncode, segment_paths):
         async def fake_exec(*args, **kwargs):
             # Last positional arg is the merged output path.
