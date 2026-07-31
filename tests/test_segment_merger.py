@@ -1,10 +1,18 @@
 import asyncio
+import importlib.util
 import os
+import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from app.core.media.segment_merger import merge_ts_segments
+_MODULE_PATH = Path(__file__).resolve().parent.parent / "app" / "core" / "media" / "segment_merger.py"
+_spec = importlib.util.spec_from_file_location("segment_merger", _MODULE_PATH)
+segment_merger = importlib.util.module_from_spec(_spec)
+sys.modules["segment_merger"] = segment_merger
+_spec.loader.exec_module(segment_merger)
+merge_ts_segments = segment_merger.merge_ts_segments
 
 
 class FakeProcess:
@@ -44,7 +52,7 @@ class MergeTsSegmentsTest(unittest.TestCase):
             return FakeProcess(returncode)
 
         with mock.patch(
-            "app.core.media.segment_merger.asyncio.create_subprocess_exec", side_effect=fake_exec
+            "segment_merger.asyncio.create_subprocess_exec", side_effect=fake_exec
         ):
             return await merge_ts_segments(segment_paths)
 
