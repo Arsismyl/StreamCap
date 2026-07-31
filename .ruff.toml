@@ -76,3 +76,6 @@ ignore = [
     "F401", # unused-import
     "F811", # redefined-while-unused
 ]
+"tests/*" = [
+    "PT", # pytest-style rules (we use unittest)
+]
