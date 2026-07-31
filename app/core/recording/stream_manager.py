@@ -50,6 +50,8 @@ class LiveStreamRecorder:
         self.direct_downloader = None
         self.min_valid_recording_duration = 25
         self.recording_start_time = 0
+        self.segment_paths: list[str] = []
+        self.reconnect_max_failures = 3
         os.makedirs(self.output_dir, exist_ok=True)
         self.services.language_manager.add_observer(self)
         self._ = {}
@@ -307,23 +309,7 @@ class LiveStreamRecorder:
                 )
             )
         else:
-            header_params = self.get_headers_params(record_url, self.platform_key)
-            cookie_str = None
-            if self.platform_key in ("youtube", "twitcasting") and self.cookies:
-                # FFmpeg -cookies expects newline-delimited format, not semicolons
-                cookie_str = "\n".join(c.strip() for c in self.cookies.split(";"))
-
-            ffmpeg_builder = ffmpeg_builders.create_builder(
-                self.save_format,
-                record_url=record_url,
-                proxy=self.proxy,
-                segment_record=self.segment_record,
-                segment_time=self.segment_time,
-                full_path=save_path,
-                headers=header_params,
-                cookies=cookie_str,
-            )
-            ffmpeg_command = ffmpeg_builder.build_command()
+            ffmpeg_command = self._build_ffmpeg_command(record_url, save_path)
             self.services.run_coro(
                 self.start_ffmpeg(
                     stream_info.anchor_name,
@@ -334,6 +320,40 @@ class LiveStreamRecorder:
                     self.user_config.get("custom_script_command"),
                 )
             )
+
+    def _build_ffmpeg_command(self, record_url: str, full_path: str) -> list:
+        header_params = self.get_headers_params(record_url, self.platform_key)
+        cookie_str = None
+        if self.platform_key in ("youtube", "twitcasting") and self.cookies:
+            cookie_str = "\n".join(c.strip() for c in self.cookies.split(";"))
+        ffmpeg_builder = ffmpeg_builders.create_builder(
+            self.save_format,
+            record_url=record_url,
+            proxy=self.proxy,
+            segment_record=self.segment_record,
+            segment_time=self.segment_time,
+            full_path=full_path,
+            headers=header_params,
+            cookies=cookie_str,
+        )
+        return ffmpeg_builder.build_command()
+
+    def _get_retry_delay(self) -> int:
+        try:
+            retry_delay = int(self.user_config.get("recording_retry_interval", 5))
+        except (ValueError, TypeError):
+            retry_delay = 5
+        return max(1, min(retry_delay, 60))
+
+    def _segment_save_path(self, base_save_path: str, index: int) -> str:
+        base, ext = os.path.splitext(base_save_path)
+        return f"{base}_{index:03d}{ext}"
+
+    def _has_recorded_content(self) -> bool:
+        for path in self.segment_paths:
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                return True
+        return False
 
     async def remove_active_recorder(self):
         try:
@@ -353,6 +373,68 @@ class LiveStreamRecorder:
             else:
                 self.recording.status_info = RecordingStatus.RECORDING_ERROR
 
+    async def _run_ffmpeg_pass(
+        self, record_name: str, live_url: str, record_url: str, ffmpeg_command: list, keep_active: bool
+    ) -> tuple[int, bytes]:
+        process = await asyncio.create_subprocess_exec(
+            *ffmpeg_command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            startupinfo=self.subprocess_start_info,
+        )
+
+        self.services.process_manager.add_process(process)
+        self.recording.status_info = RecordingStatus.RECORDING
+        self.recording.record_url = record_url
+        logger.info(f"Recording in Progress: {live_url}")
+        logger.log("STREAM", f"Recording Stream URL: {record_url}")
+        if self.recording_start_time == 0:
+            self.recording_start_time = time.time()
+
+        while True:
+            if self.should_stop or self.recording.force_stop or not self.services.recording_enabled:
+                logger.info(f"Preparing to End Recording: {live_url}")
+                if not keep_active:
+                    await self.remove_active_recorder()
+                    self.recording.is_recording = False
+                try:
+                    if os.name == "nt":
+                        if process.stdin:
+                            process.stdin.write(b"q")
+                            await process.stdin.drain()
+                            await asyncio.sleep(5)
+                    else:
+                        import signal
+
+                        process.send_signal(signal.SIGINT)
+                        await asyncio.sleep(5)
+
+                    if process.stdin:
+                        process.stdin.close()
+
+                    await asyncio.wait_for(process.wait(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f"FFmpeg process did not exit gracefully, forcing termination: {live_url}")
+                    process.kill()
+                    await process.wait()
+
+                self.recording.force_stop = False
+                break
+
+            if process.returncode is not None:
+                logger.info(f"Exit loop recording (normal 0 | abnormal 1): code={process.returncode}, {live_url}")
+                if not keep_active:
+                    await self.remove_active_recorder()
+                    self.recording.is_recording = False
+                break
+
+            await asyncio.sleep(1)
+
+        return_code = process.returncode
+        stdout, stderr = await process.communicate()
+        return return_code, stderr
+
     async def start_ffmpeg(
         self,
         record_name: str,
@@ -362,72 +444,26 @@ class LiveStreamRecorder:
         save_type: str,
         script_command: str | None = None,
     ) -> bool:
-        """
-        The child process executes ffmpeg for recording
-        """
-
         logger.info(f"Starting ffmpeg recording - recorder id: {id(self)}, rec_id: {self.recording.rec_id}")
         self.should_stop = False
+        self.segment_paths = []
 
         try:
             save_file_path = ffmpeg_command[-1]
+            self.segment_paths.append(save_file_path)
+            keep_active = False
+            reconnect_enabled = False
+            return_code = None
+            stderr = None
 
-            process = await asyncio.create_subprocess_exec(
-                *ffmpeg_command,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                startupinfo=self.subprocess_start_info,
+            return_code, stderr = await self._run_ffmpeg_pass(
+                record_name, live_url, record_url, ffmpeg_command, keep_active=keep_active
             )
 
-            self.services.process_manager.add_process(process)
-            self.recording.status_info = RecordingStatus.RECORDING
-            self.recording.record_url = record_url
-            logger.info(f"Recording in Progress: {live_url}")
-            logger.log("STREAM", f"Recording Stream URL: {record_url}")
-            self.recording_start_time = time.time()
+            await self.remove_active_recorder()
+            self.recording.is_recording = False
 
-            while True:
-                if self.should_stop or self.recording.force_stop or not self.services.recording_enabled:
-                    logger.info(f"Preparing to End Recording: {live_url}")
-                    await self.remove_active_recorder()
-                    self.recording.is_recording = False
-                    try:
-                        if os.name == "nt":
-                            if process.stdin:
-                                process.stdin.write(b"q")
-                                await process.stdin.drain()
-                                await asyncio.sleep(5)
-                        else:
-                            import signal
-
-                            process.send_signal(signal.SIGINT)
-                            # process.terminate()
-                            await asyncio.sleep(5)
-
-                        if process.stdin:
-                            process.stdin.close()
-
-                        await asyncio.wait_for(process.wait(), timeout=15.0)
-                    except asyncio.TimeoutError:
-                        logger.warning(f"FFmpeg process did not exit gracefully, forcing termination: {live_url}")
-                        process.kill()
-                        await process.wait()
-
-                    self.recording.force_stop = False
-                    break
-
-                if process.returncode is not None:
-                    logger.info(f"Exit loop recording (normal 0 | abnormal 1): code={process.returncode}, {live_url}")
-                    await self.remove_active_recorder()
-                    self.recording.is_recording = False
-                    break
-
-                await asyncio.sleep(1)
-
-            return_code = process.returncode
             safe_return_code = [0, 255]
-            stdout, stderr = await process.communicate()
 
             if return_code not in safe_return_code and stderr:
                 if not self.recording.is_recording:
@@ -435,18 +471,11 @@ class LiveStreamRecorder:
                     self._handle_recording_error(record_name, self._["record_stream_error"])
 
                     # Auto-retry once after transient CDN error (e.g. TikTok 5xx)
-                    if not self.should_stop and not getattr(self, '_retried', False):
+                    if not self.should_stop and not getattr(self, "_retried", False):
                         self._retried = True
-                        try:
-                            retry_delay = int(self.user_config.get("recording_retry_interval", 5))
-                        except (ValueError, TypeError):
-                            retry_delay = 5
-                        retry_delay = max(1, min(retry_delay, 60))
-                        await asyncio.sleep(retry_delay)
-                        logger.info(f"Auto-retry recording after {retry_delay}s delay: {live_url}")
-                        self.services.run_coro(
-                            self.services.recording_manager.check_if_live(self.recording)
-                        )
+                        await asyncio.sleep(self._get_retry_delay())
+                        logger.info(f"Auto-retry recording after retry delay: {live_url}")
+                        self.services.run_coro(self.services.recording_manager.check_if_live(self.recording))
 
             if return_code in safe_return_code:
                 if not self.recording.is_recording:
@@ -461,8 +490,8 @@ class LiveStreamRecorder:
 
                 if self.user_config.get("convert_to_mp4") and self.save_format == "ts":
                     if self.segment_record:
-                        file_paths = utils.get_file_paths(os.path.dirname(save_file_path))
-                        prefix = os.path.basename(save_file_path).rsplit("_", maxsplit=1)[0]
+                        file_paths = utils.get_file_paths(os.path.dirname(self.segment_paths[0]))
+                        prefix = os.path.basename(self.segment_paths[0]).rsplit("_", maxsplit=1)[0]
                         for path in file_paths:
                             if prefix in path:
                                 try:
@@ -473,11 +502,11 @@ class LiveStreamRecorder:
                     else:
                         try:
                             self.services.run_coro(
-                                self.converts_mp4(save_file_path, self.user_config["delete_original"])
+                                self.converts_mp4(self.segment_paths[0], self.user_config["delete_original"])
                             )
                         except Exception as e:
                             logger.error(f"Failed to convert video: {e}")
-                            await self.converts_mp4(save_file_path, self.user_config["delete_original"])
+                            await self.converts_mp4(self.segment_paths[0], self.user_config["delete_original"])
 
                 if self.user_config.get("execute_custom_script") and script_command:
                     logger.info("Prepare a direct script in the background")
@@ -486,7 +515,7 @@ class LiveStreamRecorder:
                             self.custom_script_execute(
                                 script_command,
                                 record_name,
-                                save_file_path,
+                                self.segment_paths[0],
                                 save_type,
                                 self.segment_record,
                                 self.user_config.get("convert_to_mp4"),
@@ -498,7 +527,7 @@ class LiveStreamRecorder:
                         await self.custom_script_execute(
                             script_command,
                             record_name,
-                            save_file_path,
+                            self.segment_paths[0],
                             save_type,
                             self.segment_record,
                             self.user_config.get("convert_to_mp4"),
