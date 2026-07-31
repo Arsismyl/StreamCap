@@ -434,11 +434,9 @@ async def start_ffmpeg(
         return_code = None
         stderr = None
 
-        while True:
-            return_code, stderr = await self._run_ffmpeg_pass(
-                record_name, live_url, record_url, ffmpeg_command, keep_active=keep_active
-            )
-            break  # no reconnect in this task; loop structure is for Task 4
+        return_code, stderr = await self._run_ffmpeg_pass(
+            record_name, live_url, record_url, ffmpeg_command, keep_active=keep_active
+        )
 
         await self.remove_active_recorder()
         self.recording.is_recording = False
