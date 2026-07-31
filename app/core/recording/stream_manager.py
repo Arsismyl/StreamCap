@@ -14,6 +14,7 @@ from ...utils import utils
 from ...utils.logger import logger
 from ..media import ffmpeg_builders
 from ..media.direct_downloader import DirectStreamDownloader
+from ..media.segment_merger import merge_ts_segments
 from ..platforms import platform_handlers
 from ..platforms.platform_handlers import StreamData
 from ..runtime.process_manager import BackgroundService
@@ -451,33 +452,83 @@ class LiveStreamRecorder:
         try:
             save_file_path = ffmpeg_command[-1]
             self.segment_paths.append(save_file_path)
-            keep_active = False
-            reconnect_enabled = False
+            segment_index = 0
+            reconnect_failures = 0
             return_code = None
             stderr = None
 
-            return_code, stderr = await self._run_ffmpeg_pass(
-                record_name, live_url, record_url, ffmpeg_command, keep_active=keep_active
-            )
+            reconnect_enabled = self.is_flv_preferred_platform and not self.segment_record
+            keep_active = reconnect_enabled
+
+            while True:
+                return_code, stderr = await self._run_ffmpeg_pass(
+                    record_name, live_url, record_url, ffmpeg_command, keep_active=keep_active
+                )
+
+                if not reconnect_enabled:
+                    break
+
+                if self.should_stop or self.recording.force_stop or not self.services.recording_enabled:
+                    break
+
+                try:
+                    stream_info = await self.fetch_stream()
+                except Exception as e:
+                    logger.warning(f"Reconnect stream fetch failed: {e}")
+                    stream_info = None
+
+                if stream_info is None:
+                    reconnect_failures += 1
+                    if reconnect_failures >= self.reconnect_max_failures:
+                        logger.warning(f"Giving up reconnect after {reconnect_failures} failed attempts: {live_url}")
+                        break
+                    await asyncio.sleep(self._get_retry_delay())
+                    continue
+
+                if not stream_info.is_live or not stream_info.record_url:
+                    logger.info(f"Stream ended, finalizing recording: {live_url}")
+                    break
+
+                segment_index += 1
+                save_file_path = self._segment_save_path(self.segment_paths[0], segment_index)
+                self.segment_paths.append(save_file_path)
+                record_url = self._get_record_url(stream_info)
+                ffmpeg_command = self._build_ffmpeg_command(record_url, save_file_path)
+                reconnect_failures = 0
+                logger.info(f"Reconnecting segment {segment_index}: {save_file_path}")
 
             await self.remove_active_recorder()
             self.recording.is_recording = False
 
+            merged = None
+            if reconnect_enabled and self.save_format == "ts" and len(self.segment_paths) > 1:
+                merged = await merge_ts_segments(self.segment_paths, startupinfo=self.subprocess_start_info)
+                if merged:
+                    logger.success(f"Merged {len(self.segment_paths)} segments into {merged}")
+                else:
+                    logger.warning("Segment merge failed, keeping segment files")
+
             safe_return_code = [0, 255]
+            has_content = self._has_recorded_content()
 
             if return_code not in safe_return_code and stderr:
                 if not self.recording.is_recording:
-                    logger.error(f"FFmpeg Stderr Output: {str(stderr.decode()).splitlines()[0]}")
-                    self._handle_recording_error(record_name, self._["record_stream_error"])
+                    if reconnect_enabled and has_content:
+                        logger.warning(
+                            f"FFmpeg exited with code {return_code} but {len(self.segment_paths)} segment(s) recorded; finalizing"
+                        )
+                    else:
+                        logger.error(f"FFmpeg Stderr Output: {str(stderr.decode()).splitlines()[0]}")
+                        self._handle_recording_error(record_name, self._["record_stream_error"])
 
-                    # Auto-retry once after transient CDN error (e.g. TikTok 5xx)
-                    if not self.should_stop and not getattr(self, "_retried", False):
-                        self._retried = True
-                        await asyncio.sleep(self._get_retry_delay())
-                        logger.info(f"Auto-retry recording after retry delay: {live_url}")
-                        self.services.run_coro(self.services.recording_manager.check_if_live(self.recording))
+                        # Auto-retry once after transient CDN error — non-FLV platforms only.
+                        if not self.should_stop and not reconnect_enabled and not getattr(self, "_retried", False):
+                            self._retried = True
+                            await asyncio.sleep(self._get_retry_delay())
+                            logger.info(f"Auto-retry recording after retry delay: {live_url}")
+                            self.services.run_coro(self.services.recording_manager.check_if_live(self.recording))
 
-            if return_code in safe_return_code:
+            if return_code in safe_return_code or (reconnect_enabled and has_content):
                 if not self.recording.is_recording:
                     await self._handle_recording_finished(record_name)
 
