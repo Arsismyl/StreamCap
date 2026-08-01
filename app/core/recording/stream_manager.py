@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import shutil
 import subprocess
@@ -347,6 +348,20 @@ class LiveStreamRecorder:
             retry_delay = 5
         return max(1, min(retry_delay, 60))
 
+    def _reconnect_semaphore(self):
+        """Return the per-platform semaphore that throttles reconnect fetches.
+
+        Mirrors the throttling applied to every other stream fetch (see
+        RecordingManager.platform_semaphores). Falls back to a no-op context
+        manager when the recording manager is not available so the reconnect
+        loop never crashes on missing services.
+        """
+        recording_manager = getattr(self.services, "recording_manager", None)
+        semaphores = getattr(recording_manager, "platform_semaphores", None)
+        if semaphores is None:
+            return contextlib.nullcontext()
+        return semaphores[self.platform_key]
+
     def _segment_save_path(self, base_save_path: str, index: int) -> str:
         base, ext = os.path.splitext(base_save_path)
         return f"{base}_{index:03d}{ext}"
@@ -480,11 +495,12 @@ class LiveStreamRecorder:
                 for _ in range(self.reconnect_max_failures):
                     if self.should_stop or self.recording.force_stop or not self.services.recording_enabled:
                         break
-                    try:
-                        stream_info = await self.fetch_stream()
-                    except Exception as e:
-                        logger.warning(f"Reconnect stream fetch failed: {e}")
-                        stream_info = None
+                    async with self._reconnect_semaphore():
+                        try:
+                            stream_info = await self.fetch_stream()
+                        except Exception as e:
+                            logger.warning(f"Reconnect stream fetch failed: {e}")
+                            stream_info = None
                     if stream_info is not None:
                         break
                     await asyncio.sleep(self._get_retry_delay())
@@ -515,6 +531,10 @@ class LiveStreamRecorder:
                     logger.success(f"Merged {len(self.segment_paths)} segments into {merged}")
                 else:
                     logger.warning("Segment merge failed, keeping segment files")
+
+            merge_failed = (
+                reconnect_enabled and self.save_format == "ts" and len(self.segment_paths) > 1 and merged is None
+            )
 
             safe_return_code = [0, 255]
             has_content = self._has_recorded_content()
@@ -558,6 +578,13 @@ class LiveStreamRecorder:
                                 except Exception as e:
                                     logger.error(f"Failed to convert video: {e}")
                                     await self.converts_mp4(path, self.user_config["delete_original"])
+                    elif merge_failed:
+                        for path in [p for p in self.segment_paths if os.path.exists(p) and os.path.getsize(p) > 0]:
+                            try:
+                                self.services.run_coro(self.converts_mp4(path, self.user_config["delete_original"]))
+                            except Exception as e:
+                                logger.error(f"Failed to convert video: {e}")
+                                await self.converts_mp4(path, self.user_config["delete_original"])
                     else:
                         try:
                             self.services.run_coro(

@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import os
 import tempfile
 import unittest
@@ -37,6 +38,7 @@ class FakeServices:
         self.language_manager = mock.MagicMock()
         self.language_manager.language = {"recording_manager": {}, "stream_manager": {}}
         self.recording_manager = mock.MagicMock()
+        self.recording_manager.platform_semaphores = collections.defaultdict(lambda: asyncio.Semaphore(3))
         self.config_manager = mock.MagicMock()
         self.process_manager = mock.MagicMock()
         self.recording_enabled = True
@@ -119,10 +121,59 @@ class ReconnectLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_exec_count["n"], 2)  # two ffmpeg passes
         self.assertTrue(recorder.recording.is_recording is False)
         m_merge.assert_awaited()
+        # Reconnect fetches ran under the real per-platform semaphore (not a MagicMock).
+        self.assertIsInstance(
+            recorder.services.recording_manager.platform_semaphores, collections.defaultdict
+        )
         # The reconnect segment was recorded to a distinct path.
         self.assertTrue(os.path.exists(os.path.join(self._tmp.name, "out_001.ts")))
         # No duplicate notification path: check_if_live must not be called.
         recorder.services.recording_manager.check_if_live.assert_not_called()
+
+    async def test_merge_failure_converts_each_segment(self):
+        recorder = make_recorder(self.recording, self.info)
+        recorder.user_config["convert_to_mp4"] = True
+        recorder.user_config["delete_original"] = True
+        recorder.should_stop = False
+        recorder.end_message_push = mock.AsyncMock()
+        recorder.converts_mp4 = mock.AsyncMock()
+
+        fetched = iter(
+            [
+                StreamData(platform="TikTok", anchor_name="test", is_live=True,
+                           flv_url="http://cdn/stream1.flv?codec=h264&sign=a",
+                           record_url="http://cdn/stream1.flv?codec=h264&sign=a"),
+                StreamData(platform="TikTok", anchor_name="test", is_live=False, record_url=None),
+            ]
+        )
+        recorder.fetch_stream = mock.AsyncMock(side_effect=fetched)
+
+        exit_codes = iter([0, 0])
+
+        async def fake_exec(*args, **kwargs):
+            out_path = args[-1]
+            with open(out_path, "w") as f:
+                f.write("seg")
+            return FakeProcess(next(exit_codes))
+
+        with mock.patch("asyncio.create_subprocess_exec", side_effect=fake_exec), \
+             mock.patch("app.core.recording.stream_manager.merge_ts_segments", new=mock.AsyncMock(return_value=None)):
+            await recorder.start_ffmpeg(
+                "test", "https://www.tiktok.com/@test/live",
+                "http://cdn/stream1.flv?sign=a", ["ffmpeg", "rec", self._tmp.name + "/out.ts"],
+                "ts", None,
+            )
+
+        await asyncio.sleep(0)  # let the run_coro-scheduled convert tasks finish
+        # Merge failed → each non-empty segment must be converted individually.
+        self.assertEqual(recorder.converts_mp4.await_count, 2)
+        self.assertEqual(
+            {os.path.normpath(call.args[0]) for call in recorder.converts_mp4.await_args_list},
+            {
+                os.path.normpath(os.path.join(self._tmp.name, "out.ts")),
+                os.path.normpath(os.path.join(self._tmp.name, "out_001.ts")),
+            },
+        )
 
     async def test_no_reconnect_when_stream_ends_immediately(self):
         recorder = make_recorder(self.recording, self.info)
