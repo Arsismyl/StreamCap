@@ -75,7 +75,7 @@ class TikTokHandler(PlatformHandler):
     async def get_stream_info(self, live_url: str) -> StreamData:
         if not self.live_stream:
             self.live_stream = streamget.TikTokLiveStream(proxy_addr=self.proxy, cookies=self.cookies)
-        json_data = await self.live_stream.fetch_web_stream_data(url=live_url)
+        json_data = await self.live_stream.fetch_app_stream_data(url=live_url)
         return await self.live_stream.fetch_stream_url(json_data, self.record_quality)
 
 
