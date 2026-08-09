@@ -341,6 +341,10 @@ class RecordingCardManager:
             await self.app.record_manager.delete_recording_cards([recording])
             current_page = getattr(self.app, "current_page", None)
             if current_page is not None and getattr(current_page, "page_name", None) == "recordings":
+                # Remove the card in the acting session too. The pubsub "delete"
+                # broadcast uses send_others_on_topic, which excludes the current
+                # session, so without this the card lingers until restart.
+                await self.remove_recording_card([recording])
                 current_page.content_area.controls[1] = current_page.create_filter_area()
                 current_page.content_area.update()
             await self.app.snack_bar.show_snack_bar(
