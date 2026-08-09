@@ -411,11 +411,12 @@ class RecordingManager:
                 asyncio.create_task(recorder.end_message_push())
 
             recording.status_info = RecordingStatus.MONITORING
-            title = f"{stream_info.anchor_name or recording.streamer_name} - {self._[recording.quality]}"
             if recording.streamer_name == self._["live_room"] or f"[{self._['is_live']}]" in recording.display_title:
+                if recording.streamer_name == self._["live_room"]:
+                    recording.streamer_name = stream_info.anchor_name
+                title = f"{recording.streamer_name or stream_info.anchor_name} - {self._[recording.quality]}"
                 recording.update(
                     {
-                        "streamer_name": stream_info.anchor_name,
                         "title": title,
                         "display_title": title,
                     }

@@ -464,6 +464,7 @@ class LiveStreamRecorder:
         """Record a live stream with FFmpeg, reconnecting on transient drops for FLV platforms."""
         logger.info(f"Starting ffmpeg recording - recorder id: {id(self)}, rec_id: {self.recording.rec_id}")
         self.should_stop = False
+        self.recording.force_stop = False
         self.segment_paths = []
 
         try:
